@@ -535,6 +535,13 @@ app.use('/api/v1/summary', authMiddleware, createSummaryRoutes(summaryService));
 app.use(errorHandler);
 ```
 
+> [!NOTE]
+> **Định hướng kiến trúc xử lý M2 (thực hiện ở Step 3–5):**
+> Để đảm bảo tính độc lập dữ liệu (test isolation) giữa các integration test và tránh duplicate seed / state sharing:
+> - `src/app.js` sẽ export hàm factory `createApp(deps)` chỉ làm nhiệm vụ lắp ráp Express middleware và mount routes nhận từ `deps`.
+> - `src/server.js` đóng vai trò là **Composition Root**, khởi tạo các Repository singleton và Service, gọi `createApp(...)` rồi gọi `app.listen()`.
+> - Mỗi integration test sẽ tự tạo các repository instance mới (hoặc gọi `repo.clear()`), khởi tạo service rồi gọi `createApp(...)` độc lập cho Supertest.
+
 ---
 
 ## 5. Chiến lược kiểm thử
@@ -544,9 +551,15 @@ app.use(errorHandler);
 ```json
 // package.json (scripts)
 {
-  "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+  "start": "node src/server.js",
+  "dev": "node --watch src/server.js",
+  "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --passWithNoTests"
 }
 ```
+
+> [!WARNING]
+> Cờ `--passWithNoTests` chỉ dùng **tạm thời** ở Step 1 khi chưa có test suite. Khi file test đầu tiên xuất hiện ở Step 2, **bắt buộc xóa** cờ này khỏi script `test` để tránh CI báo pass giả tạo khi test bị thiếu.
+
 
 ```js
 // jest.config.js
@@ -714,15 +727,15 @@ graph LR
 | | |
 |---|---|
 | **Mục tiêu** | Khởi tạo Node.js project với ESM, cài dependencies |
-| **File tạo/sửa** | `package.json`, `jest.config.js`, `src/server.js`, `src/app.js`, `src/config/index.js` |
-| **DoD** | `npm test` chạy được (dù chưa có test). `node src/server.js` khởi động server trả `404` cho mọi route. `"type": "module"` trong `package.json`. |
+| **File tạo/sửa** | `package.json`, `jest.config.js`, `.env.example`, `src/server.js`, `src/app.js`, `src/config/index.js` |
+| **DoD** | `npm test` chạy được (dù chưa có test, dùng tạm `--passWithNoTests`). `node src/server.js` khởi động server trả `404` cho mọi route. `"type": "module"` trong `package.json`. Script `"dev": "node --watch src/server.js"` hoạt động (xử lý M1). |
 
 #### Step 2 — Errors, Utils, Middleware
 | | |
 |---|---|
 | **Mục tiêu** | Xây nền tảng: custom error class, validation utils, error handler middleware, auth middleware |
 | **File tạo** | `src/errors/AppError.js`, `src/utils/validators.js`, `src/utils/dateUtils.js`, `src/middleware/errorHandler.js`, `src/middleware/authMiddleware.js` |
-| **DoD** | Unit test cho `validators.js` và `dateUtils.js` pass. `AppError` có thể tạo instance với statusCode + message. |
+| **DoD** | Unit test cho `validators.js` và `dateUtils.js` pass. `AppError` có thể tạo instance với statusCode + message. Khi file test đầu tiên xuất hiện ở Step 2, **xóa `--passWithNoTests` khỏi script `test`** trong `package.json`. |
 | **File test** | `tests/unit/utils/validators.test.js`, `tests/unit/utils/dateUtils.test.js` |
 
 #### Step 3 — Repositories
@@ -854,6 +867,25 @@ graph LR
 | 3.3 | camelCase hàm/biến, PascalCase class | `AppError` (class), `createTransaction` (hàm), `totalIncome` (biến). Review ở Step 16. |
 | 4.1 | Unit test: happy + edge | Bảng test chi tiết ở phần 5.3: mỗi hàm service ≥ 1 happy + 1 edge. Tổng ≈ 36+ unit test. |
 | 4.2 | Integration test với Supertest | Bảng test chi tiết ở phần 5.4: mỗi endpoint ≥ 1 test. Tổng ≈ 29+ integration test. |
+
+---
+
+## 8. Quyết định kiến trúc & Ghi chú bổ sung (ADR & Architecture Notes)
+
+### 8.1 Các quyết định đã chốt (Q1, Q2, Q3)
+
+| # | Quyết định | Nội dung chi tiết |
+|---|------------|-------------------|
+| **Q1** | **Dev script** | Bổ sung script `"dev": "node --watch src/server.js"` vào `package.json`. Tận dụng tính năng `--watch` built-in của Node.js (≥ 18) để tự động restart server khi code thay đổi, không cần cài thêm `nodemon` hay phụ thuộc bên ngoài (xử lý M1). |
+| **Q2** | **Quản lý biến môi trường & JWT Secret fallback** | Cấu hình trong `src/config/index.js` tuân thủ cơ chế **Environment-aware**:<br>- Ở môi trường `development` / `test` (`NODE_ENV !== 'production'`): cho phép fallback về giá trị mặc định an toàn (`'expense-tracker-dev-secret'`).<br>- Ở môi trường `production` (`NODE_ENV === 'production'`): nếu thiếu biến môi trường hoặc chuỗi rỗng (`||`) thì dừng ngay lập tức và ném lỗi `throw new Error('[Config] Missing required env var: ...')`.<br>- Cung cấp template `.env.example` liệt kê đầy đủ các biến môi trường cần thiết.<br>- Trong unit/integration test, phải tường minh thiết lập `process.env.JWT_SECRET` trong `beforeAll`, không dựa vào fallback mặc định. |
+| **Q3** | **Cờ `--passWithNoTests` tạm thời** | Thêm tạm thời cờ `--passWithNoTests` vào script `test` ở Step 1 để lệnh test thoát sạch với exit code 0 khi chưa có test suite. **Bắt buộc xóa cờ này ngay khi file test đầu tiên xuất hiện ở Step 2**, đảm bảo test runner báo lỗi (exit code 1) nếu vô tình làm mất file test. |
+
+### 8.2 Định hướng xử lý mâu thuẫn kiến trúc (M1, M2)
+
+| # | Vấn đề | Định hướng giải pháp |
+|---|--------|---------------------|
+| **M1** | Thiếu script `dev` trong thiết kế ban đầu so với README | Đã giải quyết ở Step 1: bổ sung script `"dev": "node --watch src/server.js"` vào `package.json` theo quyết định Q1. |
+| **M2** | `app.js` vừa là Composition Root vừa export cho Supertest — rủi ro duplicate seed / shared state | **Định hướng triển khai ở Step 3–5:**<br>1. `src/app.js` sẽ export hàm factory `createApp(deps = {})`. File này chỉ đóng vai trò lắp ráp Express middleware và mount routes với dependencies được truyền vào từ bên ngoài.<br>2. `src/server.js` đóng vai trò là **Composition Root** thực sự của ứng dụng production: khởi tạo các Repository singleton và Service, gọi `createApp(...)` rồi gọi `app.listen()`.<br>3. Trong **Integration Test**: mỗi file test sẽ tự tạo repository instance mới (hoặc gọi `repo.clear()`), khởi tạo services tương ứng và gọi `createApp(...)` độc lập cho Supertest. Điều này đảm bảo tính cô lập tuyệt đối giữa các bài test (test isolation), tránh side-effects do chia sẻ instance singleton. |
 
 ---
 
